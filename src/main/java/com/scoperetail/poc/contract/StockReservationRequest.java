@@ -1,5 +1,8 @@
 package com.scoperetail.poc.contract;
 
-public record StockReservationRequest(String sku,
-                                      int quantity) {
+import java.util.List;
+
+public record StockReservationRequest(
+        String orderId,
+        List<StockReservationLine> items) {
 }

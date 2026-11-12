@@ -1,9 +1,11 @@
 package com.scoperetail.poc.contract;
 
+import java.util.List;
+
 public record StockReleaseResponse(
-        ReservationStatus status,
+        ReleaseStatus status,
         String message,
-        String sku,
-        int releasedQuantity
+        String orderId,
+        List<InventoryLineResult> items
 ) {
 }
