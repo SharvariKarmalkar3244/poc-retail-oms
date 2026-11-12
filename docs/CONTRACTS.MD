@@ -17,7 +17,7 @@ The Order Service should not know:
 - how products are stored
 - where product data comes from
 - how inventory is maintained
-- how stock reservations are performed
+- how stock reservations are tracked internally
 
 Instead, the Order Service communicates through well-defined interfaces.
 
@@ -37,20 +37,22 @@ The system models a retail ordering process.
 
 Customer places an order for:
 
-- SKU: `BEV-001`
-- Quantity: `2`
+| SKU | Quantity |
+|------|----------|
+| BEV-001 | 2 |
+| BEV-002 | 1 |
 
 Before confirming the order, the system must:
 
-1. Verify the product exists.
-2. Retrieve product information and price.
+1. Verify all products exist.
+2. Retrieve product information and prices.
 3. Verify enough stock is available.
 4. Reserve stock.
-5. Confirm or reject the order.
+5. Confirm the order or reject it.
 
 The Order Service owns the ordering workflow.
 
-To complete its work it depends on:
+To complete its work, it depends on:
 
 - Product Service
 - Inventory Service
@@ -84,7 +86,9 @@ This guarantees pricing integrity and prevents customers from manipulating price
 
 ```java
 public interface ProductLookup {
+
     ProductInfo findBySku(String sku);
+
 }
 ```
 
@@ -112,12 +116,12 @@ containing:
 
 ```java
 ProductInfo product =
-    productLookup.findBySku("BEV-001");
+        productLookup.findBySku("BEV-001");
 ```
 
-### Why ProductInfo is Returned Directly
+### Why ProductInfo Is Returned Directly
 
-The method returns `ProductInfo` instead of `Optional`.
+The method returns `ProductInfo` instead of `Optional<ProductInfo>`.
 
 **Reason:**
 
@@ -129,23 +133,21 @@ If the SKU does not exist, `ProductNotFoundException` is thrown.
 
 This leads to a cleaner and more explicit workflow.
 
-**Example:**
-
-Preferred:
+### Preferred
 
 ```java
 ProductInfo product =
-    productLookup.findBySku("BEV-001");
+        productLookup.findBySku("BEV-001");
 ```
 
-Instead of:
+### Instead Of
 
 ```java
 Optional<ProductInfo> product =
-    productLookup.findBySku("BEV-001");
+        productLookup.findBySku("BEV-001");
 ```
 
-which would force every caller to handle `Optional`.
+which would require the caller to handle the absence of a product even though a product is mandatory for order creation.
 
 ---
 
@@ -163,7 +165,7 @@ It only needs:
 - Product name
 - Selling price
 
-Therefore `ProductInfo` acts as a lightweight data transfer object.
+Therefore `ProductInfo` acts as a lightweight Data Transfer Object (DTO).
 
 ---
 
@@ -171,15 +173,29 @@ Therefore `ProductInfo` acts as a lightweight data transfer object.
 
 ```java
 public record ProductInfo(
-    String sku,
-    String name,
-    BigDecimal price
+        String sku,
+        String name,
+        BigDecimal price
 ) {}
 ```
 
-### Why BigDecimal is Used
+### Why Records Are Used
 
-Money values should not use `double`.
+Records are ideal for DTOs because:
+
+- immutable by default
+- less boilerplate code
+- automatically generate:
+    - constructor
+    - accessors
+    - equals()
+    - hashCode()
+    - toString()
+- easier to maintain and read
+
+### Why BigDecimal Is Used
+
+Money values should never use `double`.
 
 Example:
 
@@ -195,7 +211,7 @@ may produce:
 
 Using `BigDecimal` ensures monetary calculations remain accurate.
 
-This is the standard approach used in enterprise retail and banking applications.
+This is the standard approach used in enterprise retail, finance and banking systems.
 
 ---
 
@@ -231,7 +247,7 @@ Failing immediately keeps the workflow simple and prevents invalid orders.
 
 ## Purpose
 
-Provides inventory reservation capabilities.
+Provides inventory reservation and inventory release capabilities.
 
 The Order Service does not directly modify inventory.
 
@@ -241,7 +257,25 @@ This ensures inventory rules remain controlled by the Inventory Service.
 
 ---
 
-## Business Rules
+## Interface
+
+```java
+public interface StockReserver {
+
+    StockReservationResponse reserve(
+            StockReservationRequest request
+    );
+
+    StockReleaseResponse release(
+            StockReleaseRequest request
+    );
+
+}
+```
+
+---
+
+# 7. Inventory Business Rules
 
 The Inventory Service must enforce:
 
@@ -252,35 +286,124 @@ Available Stock = On Hand - Reserved
 Inventory must never:
 
 - become negative
+- reserve more stock than available
 - exceed physical stock levels
-
-Reservations occur only when sufficient stock exists.
 
 ---
 
-## Interface
+## All-Or-Nothing Reservation Rule
+
+Orders must be reserved atomically.
+
+If even one SKU in the order cannot be reserved:
+
+```text
+No inventory is reserved.
+```
+
+### Example
+
+| SKU | Requested | Available |
+|------|-----------|-----------|
+| BEV-001 | 2 | 10 |
+| BEV-002 | 5 | 3 |
+
+Result:
+
+```text
+Reservation Failed
+```
+
+Reserved Inventory:
+
+```text
+0 units
+```
+
+Partial reservations are not allowed.
+
+This ensures order consistency.
+
+---
+
+# 8. Reservation Ownership Rule
+
+Every successful reservation belongs to exactly one order.
+
+Reservations are tracked using:
 
 ```java
-public interface StockReserver {
+orderId
+```
 
-    StockReservationResponse reserve(
-        StockReservationRequest request
-    );
+Inventory Service must associate all reserved stock with the order that created the reservation.
 
-    StockReleaseResponse release(
+### Example
+
+Order:
+
+```text
+ORD-1001
+```
+
+Reserves:
+
+```text
+BEV-001 → 2
+BEV-002 → 1
+```
+
+Inventory Service stores ownership of those reservations.
+
+### Why This Matters
+
+Without ownership information there would be no way to determine:
+
+- who reserved stock
+- which order is being cancelled
+- which inventory must be released
+
+Using `orderId` prevents one order from releasing another order's reservations.
+
+---
+
+# 9. StockReservationLine
+
+## Purpose
+
+Represents a single product entry inside a reservation request.
+
+---
+
+## Structure
+
+```java
+public record StockReservationLine(
         String sku,
         int quantity
-    );
-}
+) {}
 ```
 
 ---
 
-# 7. StockReservationRequest
+## Example
+
+```java
+new StockReservationLine(
+        "BEV-001",
+        2
+);
+```
+
+---
+
+# 10. StockReservationRequest
 
 ## Purpose
 
-Represents a request to reserve stock.
+Represents a request to reserve inventory for an entire order.
+
+An order may contain one or many products.
 
 ---
 
@@ -288,29 +411,79 @@ Represents a request to reserve stock.
 
 ```java
 public record StockReservationRequest(
-    String sku,
-    int quantity
+        String orderId,
+        List<StockReservationLine> items
 ) {}
 ```
 
-### Example
+---
+
+## Example
 
 ```java
 new StockReservationRequest(
-    "BEV-001",
-    2
+        "ORD-1001",
+        List.of(
+                new StockReservationLine("BEV-001", 2),
+                new StockReservationLine("BEV-002", 1)
+        )
 );
 ```
 
 ---
 
-# 8. StockReservationResponse
+## Validation Rules
+
+The Inventory Service should reject requests when:
+
+- orderId is missing
+- item list is empty
+- quantity is zero
+- quantity is negative
+- duplicate SKUs exist in the request
+
+---
+
+## Invalid Example
+
+```java
+new StockReservationRequest(
+        "ORD-1001",
+        List.of(
+                new StockReservationLine("BEV-001", 2),
+                new StockReservationLine("BEV-001", 3)
+        )
+);
+```
+
+Duplicate SKUs are not allowed.
+
+Clients must aggregate quantities before sending the request.
+
+---
+
+# 11. StockReservationResponse
 
 ## Purpose
 
-Represents the result of a stock reservation attempt.
+Represents the result of a reservation attempt.
 
-### Why Not Use boolean
+---
+
+## Structure
+
+```java
+public record StockReservationResponse(
+        ReservationStatus status,
+        String message,
+        String orderId,
+        List<InventoryLineResult> items
+) {}
+```
+
+---
+
+## Why Not Use boolean
 
 Using:
 
@@ -318,7 +491,7 @@ Using:
 boolean reserve(...)
 ```
 
-only provides:
+provides only:
 
 ```java
 true
@@ -330,44 +503,46 @@ or
 false
 ```
 
-It does not explain:
+and does not explain:
 
 - why reservation failed
-- how much stock was available
-- whether SKU exists
+- whether stock was insufficient
+- whether the SKU exists
 - whether quantity was invalid
 
-A richer response provides meaningful business information.
+A response object provides meaningful business information.
 
 ---
 
-## Example
-
-### Success
+## Example Success
 
 ```java
 {
     status=SUCCESS,
-    message="Stock reserved successfully"
-}
-```
-
-### Failure
-
-```java
-{
-    status=INSUFFICIENT_STOCK,
-    message="Only 3 units available"
+    message="Inventory reserved successfully",
+    orderId="ORD-1001"
 }
 ```
 
 ---
 
-# 9. ReservationStatus
+## Example Failure
+
+```java
+{
+    status=INSUFFICIENT_STOCK,
+    message="Insufficient inventory",
+    orderId="ORD-1001"
+}
+```
+
+---
+
+# 12. ReservationStatus
 
 ## Purpose
 
-Represents the outcome of reservation operations.
+Represents possible reservation outcomes.
 
 ---
 
@@ -382,7 +557,7 @@ INVALID_QUANTITY
 
 ### SUCCESS
 
-Reservation completed.
+Reservation completed successfully.
 
 ### INSUFFICIENT_STOCK
 
@@ -390,7 +565,7 @@ Requested quantity exceeds available stock.
 
 ### SKU_NOT_FOUND
 
-Inventory record does not exist.
+Inventory record does not exist for the SKU.
 
 ### INVALID_QUANTITY
 
@@ -398,55 +573,122 @@ Quantity is zero or negative.
 
 ---
 
-# 10. Stock Release
+# 13. InventoryLineResult
 
 ## Purpose
 
-Releases previously reserved stock.
-
-Used when:
-
-- an order is cancelled
-- a reservation must be rolled back
+Represents inventory details for an individual SKU within a response.
 
 ---
 
-## Business Rule
+## Structure
 
-Releasing stock should:
-
-```text
-reserved = reserved - quantity
-```
-
-and therefore:
-
-```text
-available = available + quantity
+```java
+public record InventoryLineResult(
+        String sku,
+        int requestedQuantity,
+        int availableQuantity
+) {}
 ```
 
 ---
 
 ## Example
 
-### Current Inventory
-
-```text
-On Hand = 10
-Reserved = 4
-Available = 6
+```java
+{
+    sku="BEV-001",
+    requestedQuantity=5,
+    availableQuantity=3
+}
 ```
 
-### Release
+This enables SKU-level visibility for reservation and release operations.
 
-```text
-Quantity = 2
+---
+
+# 14. StockReleaseRequest
+
+## Purpose
+
+Represents a request to release inventory associated with an order.
+
+Releasing inventory should always happen through an order identifier rather than by SKU and quantity.
+
+---
+
+## Structure
+
+```java
+public record StockReleaseRequest(
+        String orderId
+) {}
 ```
 
-### Result
+---
 
-```text
-On Hand = 10
-Reserved = 2
-Available = 8
+## Example
+
+```java
+new StockReleaseRequest(
+        "ORD-1001"
+);
 ```
+
+---
+
+# 15. StockReleaseResponse
+
+## Purpose
+
+Represents the outcome of releasing previously reserved inventory.
+
+---
+
+## Structure
+
+```java
+public record StockReleaseResponse(
+        ReleaseStatus status,
+        String message,
+        String orderId,
+        List<InventoryLineResult> items
+) {}
+```
+
+---
+
+# 16. ReleaseStatus
+
+## Purpose
+
+Represents possible inventory release outcomes.
+
+---
+
+## Values
+
+```java
+SUCCESS
+ORDER_NOT_FOUND
+ALREADY_CANCELLED
+RESERVATION_NOT_FOUND
+```
+
+### SUCCESS
+
+Inventory released successfully.
+
+### ORDER_NOT_FOUND
+
+The specified order does not exist.
+
+### ALREADY_CANCELLED
+
+The order has already been cancelled and inventory has already been released.
+
+### RESERVATION_NOT_FOUND
+
+No reservation exists for the supplied order.
+
+---
